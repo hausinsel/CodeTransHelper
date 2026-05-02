@@ -3,6 +3,8 @@
 
 [versions]
 guava = "33.5.0-jre"
+openai = "4.33.0"
 
 [libraries]
 guava = { module = "com.google.guava:guava", version.ref = "guava" }
+openai = { group = "com.openai", name = "openai-java", version.ref = "openai" }
