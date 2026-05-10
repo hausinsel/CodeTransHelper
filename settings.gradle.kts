@@ -12,3 +12,4 @@ plugins {
 
 rootProject.name = "CodeTransHelper"
 include("app")
+include("interModuleDependency")
