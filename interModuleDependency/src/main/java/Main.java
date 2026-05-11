@@ -16,13 +16,14 @@ public class Main {
 
         while ((line = br.readLine()) != null) {
             if (line.contains(processName)/* ToDo: && line.contains(weitere Spezifikationen)*/) {
-                System.out.println(line);
                 matcher =  idPattern.matcher(line);
                 if (matcher.find()) {
                     startIndex = matcher.start();
                     endIndex = matcher.end();
 
                     return line.substring(startIndex, endIndex);
+                } else {
+                    throw new NoSuchElementException("No matching pattern found");
                 }
             }
         }
@@ -57,10 +58,3 @@ public class Main {
         }
     }
 }
-
-/*
-    String line;
-    while ((line = br.readLine()) != null) {
-        System.out.println(line);
-    }
-*/
