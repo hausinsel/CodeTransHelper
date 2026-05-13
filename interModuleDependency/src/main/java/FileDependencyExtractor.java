@@ -699,13 +699,50 @@ public class FileDependencyExtractor {
      * Topologische Sortierung (Kahn). Liefert Migrationsreihenfolge:
      * Dateien ohne Abhaengigkeiten zuerst; eine Datei wird erst migriert,
      * wenn alle ihre Abhaengigkeitsziele migriert sind.
-     * Falls Zyklen existieren, werden sie separat ausgegeben.
+     * <p>
+     * Erweiterung gegenueber dem Standard-Kahn: nach Ausgabe eines Headers
+     * wird geprueft, ob seine gepaarte {@code .cpp} bereits "ready" ist
+     * (alle deren Deps schon emittiert). Wenn ja, wird sie an den Anfang
+     * der Ready-Queue gezogen und direkt anschliessend ausgegeben — damit
+     * stehen .h und .cpp im Migrationsplan moeglichst nebeneinander. Falls
+     * die .cpp noch weitere offene Deps hat, bleibt sie regulaer eingereiht
+     * (Topologie bricht das Pairing).
+     * <p>
+     * Zyklen werden separat hinten angefuegt und auf stderr gemeldet.
      */
     public List<String> topologicalOrder() {
-        // Knotenset
         Set<String> allFiles = new TreeSet<>();
         allFiles.addAll(fileDeps.keySet());
         fileDeps.values().forEach(allFiles::addAll);
+
+        // Pairing-Index: jeder Header -> seine zugehoerige Source-Datei
+        // (sofern beide in der Closure sind).
+        Map<String, String> headerToSource = new HashMap<>();
+        Map<String, Map<String, String>> stemToExts = new HashMap<>();
+        for (String f : allFiles) {
+            String norm = f.replace('\\', '/');
+            int dot = norm.lastIndexOf('.');
+            int slash = norm.lastIndexOf('/');
+            if (dot < 0 || dot < slash) {
+                continue;
+            }
+            String stem = norm.substring(0, dot);
+            String ext = norm.substring(dot).toLowerCase();
+            stemToExts.computeIfAbsent(stem, k -> new HashMap<>()).put(ext, f);
+        }
+        for (var e : stemToExts.entrySet()) {
+            Map<String, String> exts = e.getValue();
+            String header = null, source = null;
+            for (String h : HEADER_EXTS) {
+                if (exts.containsKey(h)) { header = exts.get(h); break; }
+            }
+            for (String s : SOURCE_EXTS) {
+                if (exts.containsKey(s)) { source = exts.get(s); break; }
+            }
+            if (header != null && source != null) {
+                headerToSource.put(header, source);
+            }
+        }
 
         // In-Degree zaehlen — fuer "Migrationsreihenfolge" drehen wir die
         // Kantenrichtung: A -> B (A haengt von B ab) heisst "B vor A".
@@ -735,13 +772,20 @@ public class FileDependencyExtractor {
 
         List<String> order = new ArrayList<>();
         while (!ready.isEmpty()) {
-            String f = ready.poll();
+            String f = ready.pollFirst();
             order.add(f);
             for (String dependent : revAdj.getOrDefault(f, List.of())) {
                 int rem = openDeps.merge(dependent, -1, Integer::sum);
                 if (rem == 0) {
-                    ready.add(dependent);
+                    ready.addLast(dependent);
                 }
+            }
+            // Pairing-Pull: ist f ein Header mit gepaarter, schon-readyer .cpp?
+            // Dann sie als naechstes ausgeben — sie war womoeglich gerade durch
+            // diesen Schritt zur Ready geworden oder wartete bereits.
+            String paired = headerToSource.get(f);
+            if (paired != null && ready.remove(paired)) {
+                ready.addFirst(paired);
             }
         }
 
