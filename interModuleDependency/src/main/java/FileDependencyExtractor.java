@@ -334,14 +334,23 @@ public class FileDependencyExtractor {
      * FILE-Namen, um z.B. "mathlib.h" -&gt; "mathlib.h" aufzuloesen.
      */
     public void aggregateIncludeDependencies() {
-        // Sammle alle bekannten Dateinamen (basename-only fuer Matching)
-        Map<String, String> basenameToFile = new HashMap<>();
+        // Basename -> ALLE Pfade mit diesem Basename (Multi-Map, keine
+        // first-wins-Aufloesung mehr). In Repos mit pro-Prozess "main.h" gibt
+        // es Dutzende Kollisionen; die alte Variante hat zufaellig EINE davon
+        // pro Basename gewaehlt und damit ganze Closures verseucht.
+        Map<String, List<String>> basenameToFiles = new HashMap<>();
+        Set<String> allFilesNorm = new LinkedHashSet<>();   // normalisierte Pfade
+        Map<String, String> normToOriginal = new HashMap<>();
         for (String f : nodeToFile.values()) {
             if (PSEUDO_FILES.contains(f)) {
                 continue;
             }
-            String bn = Path.of(f).getFileName().toString();
-            basenameToFile.putIfAbsent(bn, f);
+            String fn = f.replace('\\', '/');
+            if (normToOriginal.putIfAbsent(fn, f) != null) {
+                continue;
+            }
+            allFilesNorm.add(fn);
+            basenameToFiles.computeIfAbsent(basenameOf(fn), k -> new ArrayList<>()).add(fn);
         }
 
         // IMPORTS-Kante: IMPORT -> DEPENDENCY
@@ -355,14 +364,86 @@ public class FileDependencyExtractor {
                 continue;
             }
             String included = dep.props.getOrDefault("NAME", "");
-            String resolvedTgt = basenameToFile.get(included);
-            if (resolvedTgt == null) {
-                continue;            // System-Header wie stdio.h überspringen
+            if (included.isEmpty()) {
+                continue;
+            }
+            String srcFile = fileOf(imp.id);
+            if (srcFile == null) {
+                continue;
             }
 
-            String srcFile = fileOf(imp.id);
+            String resolvedNorm = resolveIncludePath(srcFile, included,
+                    basenameToFiles, allFilesNorm);
+            if (resolvedNorm == null) {
+                continue;       // System-Header wie stdio.h: nichts im Repo.
+            }
+            String resolvedTgt = normToOriginal.getOrDefault(resolvedNorm, resolvedNorm);
             addDep(srcFile, resolvedTgt, 1);
         }
+    }
+
+    /**
+     * Aufloesung eines {@code #include}-Targets. C/C++-konform wird das
+     * Verzeichnis der inkludierenden Datei als Suchbasis genutzt; bei
+     * mehreren Kandidaten gewinnt der mit dem laengsten gemeinsamen
+     * Pfad-Praefix zur Quelle. Path-Separatoren sind transparent ('/' vs '\').
+     *
+     * @return normalisierter ('/' getrennter) Treffer-Pfad oder {@code null}.
+     */
+    private static String resolveIncludePath(String srcFile, String included,
+                                             Map<String, List<String>> basenameToFiles,
+                                             Set<String> allFilesNorm) {
+        String inc = included.replace('\\', '/');
+        List<String> candidates;
+        if (inc.contains("/")) {
+            // Pfadfragment im Include selbst -> Suffix-Match.
+            String suffix = inc.startsWith("/") ? inc : "/" + inc;
+            candidates = new ArrayList<>();
+            for (String f : allFilesNorm) {
+                if (f.endsWith(suffix) || f.equals(inc)) {
+                    candidates.add(f);
+                }
+            }
+        } else {
+            candidates = basenameToFiles.getOrDefault(inc, List.of());
+        }
+        if (candidates.isEmpty()) {
+            return null;
+        }
+        if (candidates.size() == 1) {
+            return candidates.get(0);
+        }
+        // Mehrdeutig: nimm den Kandidaten, dessen Verzeichnis am laengsten
+        // mit dem Verzeichnis der Quelle uebereinstimmt.
+        String[] srcParts = dirOf(srcFile.replace('\\', '/')).split("/");
+        String best = null;
+        int bestScore = -1;
+        for (String c : candidates) {
+            String[] cParts = dirOf(c).split("/");
+            int n = Math.min(srcParts.length, cParts.length);
+            int score = 0;
+            for (int i = 0; i < n; i++) {
+                if (!srcParts[i].equals(cParts[i])) {
+                    break;
+                }
+                score++;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    private static String basenameOf(String pathNorm) {
+        int slash = pathNorm.lastIndexOf('/');
+        return slash < 0 ? pathNorm : pathNorm.substring(slash + 1);
+    }
+
+    private static String dirOf(String pathNorm) {
+        int slash = pathNorm.lastIndexOf('/');
+        return slash < 0 ? "" : pathNorm.substring(0, slash);
     }
 
     // ---------- Root-Aufloesung + transitive Huelle ----------
@@ -466,16 +547,36 @@ public class FileDependencyExtractor {
         return hits;
     }
 
+    private static final String[] HEADER_EXTS = {".h", ".hpp", ".hxx"};
+    private static final String[] SOURCE_EXTS = {".cpp", ".cxx", ".cc", ".c"};
+
     /**
      * Reduziert {@link #fileDeps}/{@link #fileDepWeights} auf die Dateien, die
      * von {@code roots} aus per transitiver Huelle ueber "haengt-ab"-Kanten
-     * erreichbar sind. Roots selbst sind immer im Ergebnis enthalten — auch
-     * wenn sie keine ausgehenden Abhaengigkeiten haben (dann erscheinen sie
-     * als isolierter Knoten im DOT-Output).
+     * erreichbar sind. Roots selbst sind immer im Ergebnis enthalten.
+     * <p>
+     * Zusaetzlich wird waehrend der BFS ein <b>Header/Source-Auto-Pairing</b>
+     * durchgefuehrt: fuer jedes besuchte {@code X.h} (bzw. {@code .hpp/.hxx})
+     * wird die korrespondierende {@code X.cpp} (bzw. {@code .cxx/.cc/.c}) am
+     * gleichen Pfad zur Closure hinzugefuegt, falls sie im CPG existiert —
+     * und symmetrisch fuer {@code .cpp -> .h}. Damit wandert die Linker-Pair-
+     * Beziehung "Implementation gehoert zu Deklaration" in die Closure, die
+     * Joern selbst nicht explizit als Edge anbietet. Die eigenen Abhaengigkeiten
+     * des frisch hinzugefuegten Files werden anschliessend ebenfalls in der
+     * BFS expandiert.
      *
      * @return Menge der erreichbaren Dateien (Roots inklusive)
      */
     public Set<String> restrictToReachable(Set<String> roots) {
+        // Lookup: normalisierter Pfad -> Original-Pfad-im-CPG.
+        Map<String, String> normToOriginal = new HashMap<>();
+        for (String f : nodeToFile.values()) {
+            if (PSEUDO_FILES.contains(f)) {
+                continue;
+            }
+            normToOriginal.putIfAbsent(f.replace('\\', '/'), f);
+        }
+
         Set<String> reachable = new HashSet<>();
         Deque<String> stack = new ArrayDeque<>(roots);
         while (!stack.isEmpty()) {
@@ -483,12 +584,19 @@ public class FileDependencyExtractor {
             if (!reachable.add(f)) {
                 continue;
             }
+            // 1) Echte Abhaengigkeiten aus dem CPG.
             Set<String> deps = fileDeps.get(f);
             if (deps != null) {
                 for (String d : deps) {
                     if (!reachable.contains(d)) {
                         stack.push(d);
                     }
+                }
+            }
+            // 2) Auto-Pair: passende .h/.cpp-Geschwister mitnehmen.
+            for (String paired : pairCandidates(f, normToOriginal)) {
+                if (!reachable.contains(paired)) {
+                    stack.push(paired);
                 }
             }
         }
@@ -503,11 +611,45 @@ public class FileDependencyExtractor {
             m.keySet().retainAll(reachable);
         }
 
-        // Roots immer als Knoten beibehalten, auch wenn sie nichts referenzieren.
-        for (String r : roots) {
-            fileDeps.putIfAbsent(r, new TreeSet<>());
+        // Alle erreichbaren Dateien als Knoten beibehalten, auch wenn sie
+        // keine ausgehenden Abhaengigkeiten haben.
+        for (String f : reachable) {
+            fileDeps.putIfAbsent(f, new TreeSet<>());
         }
         return reachable;
+    }
+
+    /**
+     * Sucht zu einem Pfad seine Header/Source-Geschwister (gleicher Stem, andere
+     * Extension) und liefert die im CPG tatsaechlich vorhandenen Treffer
+     * (mit ihren Original-Pfaden).
+     */
+    private static List<String> pairCandidates(String filePath,
+                                               Map<String, String> normToOriginal) {
+        String norm = filePath.replace('\\', '/');
+        int dot = norm.lastIndexOf('.');
+        if (dot < 0) {
+            return List.of();
+        }
+        String stem = norm.substring(0, dot);
+        String ext = norm.substring(dot).toLowerCase();
+        String[] targetExts;
+        if (Arrays.asList(HEADER_EXTS).contains(ext)) {
+            targetExts = SOURCE_EXTS;
+        } else if (Arrays.asList(SOURCE_EXTS).contains(ext)) {
+            targetExts = HEADER_EXTS;
+        } else {
+            return List.of();
+        }
+        List<String> result = new ArrayList<>();
+        for (String te : targetExts) {
+            String candidate = stem + te;
+            String hit = normToOriginal.get(candidate);
+            if (hit != null) {
+                result.add(hit);
+            }
+        }
+        return result;
     }
 
     private void addDep(String from, String to, int weight) {
