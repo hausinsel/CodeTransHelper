@@ -22,10 +22,16 @@ public class Main {
                 "  <export.dot>     Pfad zur CPG-DOT-Datei aus Joern.\n" +
                 "  --root <name>    Wurzelpunkt fuer die Dependency-Closure. Optional; mehrfach angebbar.\n" +
                 "                   <name> wird gematcht gegen (in dieser Reihenfolge):\n" +
-                "                     1) vollen Dateipfad, z.B. src/db/TConnectionPool.cpp\n" +
-                "                     2) Datei-Basename,   z.B. TConnectionPool.cpp\n" +
-                "                     3) NAME/FULL_NAME von METHOD/TYPE_DECL/NAMESPACE_BLOCK,\n" +
-                "                        z.B. main oder TConnectionPool.Commit\n" +
+                "                     1) exakter Pfad einer FILE im CPG\n" +
+                "                          z.B. coid00t/main.cpp\n" +
+                "                     2) Pfad-Suffix (wenn <name> einen / oder \\ enthaelt)\n" +
+                "                          z.B. --root coid00t/main.cpp matcht\n" +
+                "                          src/coid00t/main.cpp ebenso wie C:\\repo\\coid00t\\main.cpp\n" +
+                "                     3) Basename (Achtung: matcht ALLE Dateien mit dem Namen!\n" +
+                "                          z.B. main.cpp matcht jede main.cpp im Repo — nutze\n" +
+                "                          Stufe 2, um auf einen Prozess einzugrenzen.)\n" +
+                "                     4) NAME/FULL_NAME einer METHOD/TYPE_DECL/NAMESPACE_BLOCK,\n" +
+                "                          z.B. main oder TConnectionPool.Commit\n" +
                 "                   Ohne --root wird der vollstaendige File-Dep-Graph ausgegeben.\n" +
                 "  --out <file.dot> Ausgabepfad (Default: file-dependencies.dot).\n");
     }

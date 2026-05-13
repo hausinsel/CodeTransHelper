@@ -371,32 +371,44 @@ public class FileDependencyExtractor {
      * Findet alle Dateien, die zu einem benutzerseitig angegebenen "Wurzel"-Namen
      * gehoeren. Match-Reihenfolge (erste nichtleere Stufe gewinnt):
      * <ol>
-     *   <li>Voller Pfadname einer FILE (z.B. {@code "src/db/TConnectionPool.cpp"})</li>
-     *   <li>Basename einer FILE (z.B. {@code "TConnectionPool.cpp"})</li>
+     *   <li><b>Exakter Pfad</b> einer FILE im CPG
+     *       (z.B. {@code "coid00t/main.cpp"} wenn Joern genau diesen Pfad
+     *       gespeichert hat).</li>
+     *   <li><b>Pfad-Suffix</b>: wenn {@code rootName} mindestens einen
+     *       Separator ({@code /} oder {@code \}) enthaelt, matcht jeder
+     *       FILE-Pfad, der mit {@code /<rootName>} endet
+     *       (z.B. {@code "coid00t/main.cpp"} matcht
+     *       {@code "C:\repo\coid00t\main.cpp"} ebenso wie
+     *       {@code "src/coid00t/main.cpp"}). Separator-agnostisch.</li>
+     *   <li><b>Basename</b>: reiner Dateiname
+     *       (z.B. {@code "main.cpp"}) — Achtung, matcht ALLE main.cpp
+     *       im Repo; verwende eine der Pfad-Stufen darueber, um zu
+     *       disambiguieren.</li>
      *   <li>METHOD/TYPE_DECL/NAMESPACE_BLOCK mit
      *       {@code NAME == rootName} oder {@code FULL_NAME == rootName}
      *       (z.B. {@code "main"}, {@code "TConnectionPool.Commit"})
      *       — Datei wird via {@link #fileOf(long)} aufgeloest.</li>
      * </ol>
-     * Gibt eine ggf. leere Menge zurueck. Mehrere Treffer auf gleicher Stufe
-     * sind erlaubt (z.B. mehrere Methoden gleichen Namens in verschiedenen
-     * Dateien) — alle deren Dateien werden zurueckgegeben.
+     * Mehrere Treffer auf gleicher Stufe sind erlaubt; alle deren Dateien
+     * werden zurueckgegeben. Leere Menge bedeutet kein Match.
      */
     public Set<String> resolveRootFiles(String rootName) {
         Set<String> hits = new LinkedHashSet<>();
 
-        // Stufe 1+2: gegen Dateinamen matchen (auf den unique values von nodeToFile).
+        // Pfade einheitlich auf '/' normalisieren, damit Windows- und
+        // Unix-Stil-Separatoren transparent funktionieren.
+        String wanted = rootName.replace('\\', '/');
+        boolean hasSeparator = wanted.contains("/");
+        String suffix = wanted.startsWith("/") ? wanted : "/" + wanted;
+
         Set<String> allFiles = new HashSet<>(nodeToFile.values());
+
+        // Stufe 1: exakter Pfad-Match (normalisiert).
         for (String f : allFiles) {
             if (PSEUDO_FILES.contains(f)) {
                 continue;
             }
-            if (f.equals(rootName)) {
-                hits.add(f);
-                continue;
-            }
-            String bn = Path.of(f).getFileName().toString();
-            if (bn.equals(rootName)) {
+            if (f.replace('\\', '/').equals(wanted)) {
                 hits.add(f);
             }
         }
@@ -404,7 +416,39 @@ public class FileDependencyExtractor {
             return hits;
         }
 
-        // Stufe 3: NAME/FULL_NAME auf Definitions-Knoten matchen.
+        // Stufe 2: Pfad-Suffix-Match (nur wenn der User ueberhaupt einen
+        // Pfad-Fragment angegeben hat — sonst waere das aequivalent zur
+        // Basename-Stufe).
+        if (hasSeparator) {
+            for (String f : allFiles) {
+                if (PSEUDO_FILES.contains(f)) {
+                    continue;
+                }
+                String fn = f.replace('\\', '/');
+                if (fn.endsWith(suffix)) {
+                    hits.add(f);
+                }
+            }
+            if (!hits.isEmpty()) {
+                return hits;
+            }
+        }
+
+        // Stufe 3: Basename.
+        for (String f : allFiles) {
+            if (PSEUDO_FILES.contains(f)) {
+                continue;
+            }
+            String bn = Path.of(f.replace('\\', '/')).getFileName().toString();
+            if (bn.equals(wanted)) {
+                hits.add(f);
+            }
+        }
+        if (!hits.isEmpty()) {
+            return hits;
+        }
+
+        // Stufe 4: NAME/FULL_NAME auf Definitions-Knoten matchen.
         Set<String> rootLabels = Set.of("METHOD", "TYPE_DECL", "NAMESPACE_BLOCK");
         for (Node n : nodes.values()) {
             if (!rootLabels.contains(n.label)) {
