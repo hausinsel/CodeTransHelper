@@ -365,6 +365,107 @@ public class FileDependencyExtractor {
         }
     }
 
+    // ---------- Root-Aufloesung + transitive Huelle ----------
+
+    /**
+     * Findet alle Dateien, die zu einem benutzerseitig angegebenen "Wurzel"-Namen
+     * gehoeren. Match-Reihenfolge (erste nichtleere Stufe gewinnt):
+     * <ol>
+     *   <li>Voller Pfadname einer FILE (z.B. {@code "src/db/TConnectionPool.cpp"})</li>
+     *   <li>Basename einer FILE (z.B. {@code "TConnectionPool.cpp"})</li>
+     *   <li>METHOD/TYPE_DECL/NAMESPACE_BLOCK mit
+     *       {@code NAME == rootName} oder {@code FULL_NAME == rootName}
+     *       (z.B. {@code "main"}, {@code "TConnectionPool.Commit"})
+     *       — Datei wird via {@link #fileOf(long)} aufgeloest.</li>
+     * </ol>
+     * Gibt eine ggf. leere Menge zurueck. Mehrere Treffer auf gleicher Stufe
+     * sind erlaubt (z.B. mehrere Methoden gleichen Namens in verschiedenen
+     * Dateien) — alle deren Dateien werden zurueckgegeben.
+     */
+    public Set<String> resolveRootFiles(String rootName) {
+        Set<String> hits = new LinkedHashSet<>();
+
+        // Stufe 1+2: gegen Dateinamen matchen (auf den unique values von nodeToFile).
+        Set<String> allFiles = new HashSet<>(nodeToFile.values());
+        for (String f : allFiles) {
+            if (PSEUDO_FILES.contains(f)) {
+                continue;
+            }
+            if (f.equals(rootName)) {
+                hits.add(f);
+                continue;
+            }
+            String bn = Path.of(f).getFileName().toString();
+            if (bn.equals(rootName)) {
+                hits.add(f);
+            }
+        }
+        if (!hits.isEmpty()) {
+            return hits;
+        }
+
+        // Stufe 3: NAME/FULL_NAME auf Definitions-Knoten matchen.
+        Set<String> rootLabels = Set.of("METHOD", "TYPE_DECL", "NAMESPACE_BLOCK");
+        for (Node n : nodes.values()) {
+            if (!rootLabels.contains(n.label)) {
+                continue;
+            }
+            String nm = n.props.get("NAME");
+            String fn = n.props.get("FULL_NAME");
+            if (rootName.equals(nm) || rootName.equals(fn)) {
+                String f = fileOf(n.id);
+                if (f != null && !PSEUDO_FILES.contains(f)) {
+                    hits.add(f);
+                }
+            }
+        }
+        return hits;
+    }
+
+    /**
+     * Reduziert {@link #fileDeps}/{@link #fileDepWeights} auf die Dateien, die
+     * von {@code roots} aus per transitiver Huelle ueber "haengt-ab"-Kanten
+     * erreichbar sind. Roots selbst sind immer im Ergebnis enthalten — auch
+     * wenn sie keine ausgehenden Abhaengigkeiten haben (dann erscheinen sie
+     * als isolierter Knoten im DOT-Output).
+     *
+     * @return Menge der erreichbaren Dateien (Roots inklusive)
+     */
+    public Set<String> restrictToReachable(Set<String> roots) {
+        Set<String> reachable = new HashSet<>();
+        Deque<String> stack = new ArrayDeque<>(roots);
+        while (!stack.isEmpty()) {
+            String f = stack.pop();
+            if (!reachable.add(f)) {
+                continue;
+            }
+            Set<String> deps = fileDeps.get(f);
+            if (deps != null) {
+                for (String d : deps) {
+                    if (!reachable.contains(d)) {
+                        stack.push(d);
+                    }
+                }
+            }
+        }
+
+        // fileDeps: nur Keys + Values im reachable-Set behalten.
+        fileDeps.keySet().retainAll(reachable);
+        for (Set<String> s : fileDeps.values()) {
+            s.retainAll(reachable);
+        }
+        fileDepWeights.keySet().retainAll(reachable);
+        for (Map<String, Integer> m : fileDepWeights.values()) {
+            m.keySet().retainAll(reachable);
+        }
+
+        // Roots immer als Knoten beibehalten, auch wenn sie nichts referenzieren.
+        for (String r : roots) {
+            fileDeps.putIfAbsent(r, new TreeSet<>());
+        }
+        return reachable;
+    }
+
     private void addDep(String from, String to, int weight) {
         if (from == null || to == null) {
             return;
