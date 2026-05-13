@@ -1,12 +1,15 @@
 import java.io.BufferedReader;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.NoSuchElementException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class Main {
+
+    public static final String ANSI_RESET = "\u001B[0m";
+    public static final String ANSI_GREEN = "\u001B[32m";
+
     static String extractIdFromProcess(BufferedReader br, String processName) throws IOException {
         String line;
         Pattern idPattern = Pattern.compile("[0-9]+");
@@ -30,31 +33,34 @@ public class Main {
         throw new NoSuchElementException(processName + " not found");
     }
 
-    public static void main(String[] args) throws FileNotFoundException {
+    public static void main(String[] args) throws IOException {
 
-        // check args for 1) process-name to build dependence graph on and 2) path to joern-graph-file
-        if (args[0].contains("help")) {
+        // check args for 1) process-name to build dependence graph on
+        if (args.length > 0 && (args[0].equals("help") || args[0].equals("--help") || args[0].equals("-h") )) {
             System.out.println("implement help-page"); // ToDo: implement help-page
             return;
-        } else if (args.length != 2) {
-            System.err.println("Usage: java Main <root-process-name> <absolute-path-to-joern-graph-file>\nFor help, "
+        } else if (args.length != 1) {
+            System.err.println("Usage: java Main <absolute-path-to-joern-graph-file>\nFor help, "
                     + "type java Main help");
             System.exit(1);
         }
 
-        String pathToFile = args[1];
-        String processName = args[0];
+        Path pathToFile = Path.of(args[0]);
+        Path pathOutputFile = Path.of("file-dependencies.dot");
 
-        try (BufferedReader br = new BufferedReader(new FileReader(pathToFile))) {
-            //br.mark(Integer.MAX_VALUE); // ToDo: i need another way to go back to the start position, bcs this
-            // files could get very large
-            String processId = extractIdFromProcess(br, processName);
-            System.out.println(processId);
-        } catch (NoSuchElementException e) {
-            System.err.println(e.getMessage());
-            System.exit(1);
-        } catch (IOException e) {
-            throw new FileNotFoundException("File not found! Given path \"" + pathToFile + "\"");
-        }
+        FileDependencyExtractor fde = new FileDependencyExtractor();
+
+        fde.parse(pathToFile);
+
+        System.out.printf(ANSI_GREEN + "Parsed %d nodes, %d edges%n" + ANSI_RESET, fde.getNodesCount(),
+                fde.getEdgesCount());
+
+        fde.resolveFiles();
+        fde.aggregateCallDependencies();
+        fde.aggregateIncludeDependencies();
+        fde.writeDot(pathOutputFile);
+
+        System.out.printf(ANSI_GREEN + "DOT geschrieben nach: %s\n" + ANSI_RESET, pathOutputFile);
+
     }
 }

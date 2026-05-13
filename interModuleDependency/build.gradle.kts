@@ -23,4 +23,5 @@ java {
 application {
     // Define the main class for the application.
     mainClass = "Main"
+    applicationDefaultJvmArgs = listOf("-Xmx8g")
 }
